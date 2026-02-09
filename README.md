@@ -12,7 +12,7 @@ This project is inspired by [Yam Peleg's tweet](https://x.com/Yampeleg/status/20
 
 ```
 WhatsApp Group
-      ↕  (polls every 3s via Green API)
+      ↕  (notification queue via Green API)
   orchestra.ts
       ↕
   ┌───┴────┐
@@ -23,7 +23,7 @@ WhatsApp Group
       └── New?    → spawn new Claude Code agent
 ```
 
-1. **New message** → spawns a new `claude -p` agent with a unique session ID
+1. **New message** → 👀 reaction → spawns a new `claude -p` agent → ⚡ reaction while working → responds in group
 2. **Reply to agent** → resumes that agent's session via `claude -p --resume`
 3. **Voice message** → downloaded, transcribed via ElevenLabs Scribe, then processed as text
 4. **Agent output** → sent back to the WhatsApp group, tagged with the agent ID

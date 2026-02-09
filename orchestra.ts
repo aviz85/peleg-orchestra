@@ -214,19 +214,105 @@ function downloadFile(url: string, dest: string): Promise<void> {
 
 // ── WhatsApp Module ─────────────────────────────────────────────────────────
 
-async function pollMessages(): Promise<WAMessage[]> {
-  const url = greenApiUrl("lastIncomingMessages") + "?minutes=1";
+interface Notification {
+  receiptId: number;
+  body: {
+    typeWebhook: string;
+    timestamp: number;
+    idMessage: string;
+    senderData?: {
+      chatId: string;
+      sender: string;
+      senderName: string;
+    };
+    messageData?: {
+      typeMessage: string;
+      textMessageData?: { textMessage: string };
+      extendedTextMessageData?: {
+        text: string;
+        stanzaId: string;
+        participant?: string;
+      };
+      fileMessageData?: {
+        downloadUrl: string;
+        mimeType: string;
+        fileName: string;
+      };
+      quotedMessage?: {
+        stanzaId: string;
+      };
+    };
+  };
+}
+
+async function receiveNotification(): Promise<Notification | null> {
+  const url = greenApiUrl("receiveNotification");
   const res = await httpRequest(url);
   if (res.status !== 200) {
-    console.error(`Poll error: ${res.status} ${res.body}`);
-    return [];
+    console.error(`Receive error: ${res.status}`);
+    return null;
   }
   try {
-    return JSON.parse(res.body);
+    const data = JSON.parse(res.body);
+    return data; // null when queue is empty
   } catch {
-    console.error("Failed to parse poll response:", res.body.slice(0, 200));
-    return [];
+    return null;
   }
+}
+
+async function deleteNotification(receiptId: number): Promise<void> {
+  const url = greenApiUrl("deleteNotification") + `/${receiptId}`;
+  await httpRequest(url, { method: "DELETE" });
+}
+
+function notificationToMessage(notif: Notification): WAMessage | null {
+  const b = notif.body;
+  const md = b.messageData;
+  if (!md || !b.senderData) return null;
+
+  const msg: WAMessage = {
+    idMessage: b.idMessage,
+    typeMessage: md.typeMessage,
+    chatId: b.senderData.chatId,
+    senderId: b.senderData.sender,
+    senderName: b.senderData.senderName,
+    timestamp: b.timestamp,
+  };
+
+  // Text message
+  if (md.textMessageData) {
+    msg.textMessage = md.textMessageData.textMessage;
+  }
+
+  // Quoted/reply message
+  if (md.extendedTextMessageData) {
+    msg.extendedTextMessageData = {
+      text: md.extendedTextMessageData.text,
+      stanzaId: md.extendedTextMessageData.stanzaId || md.quotedMessage?.stanzaId || "",
+      participant: md.extendedTextMessageData.participant,
+    };
+    if (md.extendedTextMessageData.stanzaId || md.quotedMessage?.stanzaId) {
+      msg.typeMessage = "quotedMessage";
+    }
+  }
+
+  // Audio/voice
+  if (md.fileMessageData && md.typeMessage === "audioMessage") {
+    msg.downloadUrl = md.fileMessageData.downloadUrl;
+    msg.mimeType = md.fileMessageData.mimeType;
+  }
+
+  return msg;
+}
+
+async function sendReaction(messageId: string, emoji: string): Promise<void> {
+  try {
+    await httpRequest(greenApiUrl("sendReaction"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chatId: WA_GROUP_ID, idMessage: messageId, reaction: emoji }),
+    });
+  } catch {}
 }
 
 async function sendMessage(
@@ -241,18 +327,24 @@ async function sendMessage(
     payload.quotedMessageId = quotedMessageId;
   }
   const body = JSON.stringify(payload);
-  const res = await httpRequest(greenApiUrl("sendMessage"), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body,
-  });
-  try {
-    const data = JSON.parse(res.body);
-    return data.idMessage || null;
-  } catch {
-    console.error("Send error:", res.body.slice(0, 200));
-    return null;
+
+  // Retry up to 3 times on transient errors
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const res = await httpRequest(greenApiUrl("sendMessage"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body,
+      });
+      const data = JSON.parse(res.body);
+      return data.idMessage || null;
+    } catch (err: any) {
+      console.warn(`  ⚠️ sendMessage attempt ${attempt}/3 failed: ${err.message}`);
+      if (attempt < 3) await sleep(2000 * attempt);
+    }
   }
+  console.error("Send failed after 3 attempts");
+  return null;
 }
 
 async function downloadMedia(downloadUrl: string): Promise<string> {
@@ -372,6 +464,9 @@ async function spawnAgent(
   console.log(`  🚀 Spawning agent: ${agentId}`);
   console.log(`     Prompt: "${prompt.slice(0, 80)}${prompt.length > 80 ? "..." : ""}"`);
 
+  // React with ⚡ to show agent is working
+  if (replyToMessageId) await sendReaction(replyToMessageId, "⚡");
+
   try {
     const args = [
       "-p",
@@ -462,6 +557,9 @@ async function resumeAgent(
 
   console.log(`  🔄 Resuming agent: ${agentId}`);
   console.log(`     Reply: "${replyText.slice(0, 80)}${replyText.length > 80 ? "..." : ""}"`);
+
+  // React with ⚡ to show agent is working
+  if (replyToMessageId) await sendReaction(replyToMessageId, "⚡");
 
   try {
     const args = [
@@ -568,16 +666,17 @@ async function routeMessage(msg: WAMessage): Promise<void> {
   // Skip if not from our group
   if (msg.chatId !== WA_GROUP_ID) return;
 
-  // Skip own messages
-  if (isOwnMessage(msg)) return;
-
-  // Skip messages from agents (starts with bot emoji)
-  if (msg.textMessage?.startsWith("🤖")) return;
+  // Skip messages from agents (starts with bot emoji or system prefix)
+  const msgText = msg.textMessage || msg.extendedTextMessageData?.text || "";
+  if (msgText.startsWith("🤖") || msgText.startsWith("🎙️") || msgText.startsWith("⚠️") || msgText.startsWith("🎼")) return;
 
   const senderName = msg.senderName || "Unknown";
   console.log(
     `\n📨 Message from ${senderName}: type=${msg.typeMessage}`
   );
+
+  // React with 👀 to acknowledge receipt
+  await sendReaction(msg.idMessage, "👀");
 
   // ── Reply to an agent message ──
   if (
@@ -637,9 +736,6 @@ async function routeMessage(msg: WAMessage): Promise<void> {
   const text = msg.textMessage || msg.extendedTextMessageData?.text || "";
   if (!text.trim()) return;
 
-  // Skip if it's a system/status message
-  if (text.startsWith("🤖") || text.startsWith("🎙️") || text.startsWith("⚠️")) return;
-
   console.log(`  → New command, spawning agent`);
   const agentId = createAgent(text);
   await spawnAgent(agentId, text, msg.idMessage);
@@ -680,25 +776,56 @@ async function main() {
     process.exit(1);
   }
 
-  console.log(`📡 Polling group ${WA_GROUP_ID} every ${POLL_INTERVAL / 1000}s`);
-  console.log("🎧 Listening for commands...\n");
+  console.log(`📡 Listening on group ${WA_GROUP_ID} (notification queue)`);
+  console.log("🎧 Waiting for commands...\n");
 
-  // Main polling loop
+  // Main notification loop
   let consecutiveErrors = 0;
   while (true) {
     try {
-      const messages = await pollMessages();
+      const notif = await receiveNotification();
+
+      if (!notif) {
+        // Queue empty, wait before checking again
+        await sleep(POLL_INTERVAL);
+        consecutiveErrors = 0;
+        continue;
+      }
+
+      // Always delete the notification from queue
+      await deleteNotification(notif.receiptId);
       consecutiveErrors = 0;
 
-      // Process messages oldest-first
-      const sorted = messages.sort((a, b) => a.timestamp - b.timestamp);
+      // Only process message webhooks (incoming + outgoing from phone)
+      const wt = notif.body.typeWebhook;
+      const chatId = notif.body.senderData?.chatId || "";
 
-      for (const msg of sorted) {
-        try {
-          await routeMessage(msg);
-        } catch (err: any) {
-          console.error(`Error routing message ${msg.idMessage}:`, err.message);
-        }
+      // Log every notification for debugging
+      console.log(`  📩 Notification: type=${wt} chat=${chatId.slice(-15)} rid=${notif.receiptId}`);
+
+      if (wt !== "incomingMessageReceived" && wt !== "outgoingMessageReceived") {
+        continue;
+      }
+
+      // Only process messages from our group
+      if (chatId !== WA_GROUP_ID) {
+        continue;
+      }
+
+      console.log(`  ✨ Commander Claude message! Converting...`);
+
+      // Convert to WAMessage and route
+      const msg = notificationToMessage(notif);
+      if (!msg) {
+        console.log(`  ⚠️ Could not convert notification to message. Body keys: ${Object.keys(notif.body).join(", ")}`);
+        console.log(`     messageData: ${JSON.stringify(notif.body.messageData || {}).slice(0, 300)}`);
+        continue;
+      }
+
+      try {
+        await routeMessage(msg);
+      } catch (err: any) {
+        console.error(`Error routing message ${msg.idMessage}:`, err.message);
       }
 
       // Prune old processed IDs (keep last 500)
@@ -709,15 +836,14 @@ async function main() {
       }
     } catch (err: any) {
       consecutiveErrors++;
-      console.error(`Poll error (${consecutiveErrors}):`, err.message);
+      console.error(`Queue error (${consecutiveErrors}):`, err.message);
       if (consecutiveErrors > 10) {
         console.error("Too many consecutive errors, waiting 30s...");
         await sleep(30000);
         consecutiveErrors = 0;
       }
+      await sleep(1000);
     }
-
-    await sleep(POLL_INTERVAL);
   }
 }
 
