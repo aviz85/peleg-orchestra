@@ -49,7 +49,13 @@ interface AgentRecord {
   prompt: string;
   pid: number | null;
   createdAt: string;
+  lastActiveAt?: string;
 }
+
+// Cleanup config
+const AGENT_TTL_HOURS = 24; // Mark idle agents as done after 24h
+const MAX_REGISTRY_SIZE = 100; // Keep last 100 agents in registry
+const MAX_LOG_AGE_DAYS = 7; // Delete log files older than 7 days
 
 interface AgentRegistry {
   [agentId: string]: AgentRecord;
@@ -146,6 +152,95 @@ function findAgentByWaMessageId(messageId: string): string | null {
     if (agent.waMessageIds.includes(messageId)) return agentId;
   }
   return null;
+}
+
+// ── Cleanup & Garbage Collection ────────────────────────────────────────────
+
+function cleanupOnStartup(): void {
+  console.log("🧹 Running startup cleanup...");
+  const reg = loadRegistry();
+  const now = Date.now();
+  let zombies = 0;
+  let expired = 0;
+  let pruned = 0;
+
+  // 1. Fix zombie agents (status "running" but no process - crashed mid-run)
+  for (const [id, agent] of Object.entries(reg)) {
+    if (agent.status === "running") {
+      reg[id].status = "idle";
+      zombies++;
+    }
+  }
+
+  // 2. Mark old idle agents as done (TTL)
+  for (const [id, agent] of Object.entries(reg)) {
+    if (agent.status !== "idle") continue;
+    const lastActive = agent.lastActiveAt || agent.createdAt;
+    const age = now - new Date(lastActive).getTime();
+    if (age > AGENT_TTL_HOURS * 60 * 60 * 1000) {
+      reg[id].status = "done";
+      expired++;
+    }
+  }
+
+  // 3. Prune registry - remove oldest "done" agents if over max size
+  const entries = Object.entries(reg);
+  if (entries.length > MAX_REGISTRY_SIZE) {
+    const doneEntries = entries
+      .filter(([, a]) => a.status === "done")
+      .sort((a, b) => new Date(a[1].createdAt).getTime() - new Date(b[1].createdAt).getTime());
+    const toRemove = doneEntries.slice(0, entries.length - MAX_REGISTRY_SIZE);
+    for (const [id] of toRemove) {
+      delete reg[id];
+      pruned++;
+    }
+  }
+
+  saveRegistry(reg);
+
+  // 4. Clean old log files
+  let logsRemoved = 0;
+  try {
+    const logFiles = fs.readdirSync(LOGS_DIR);
+    for (const f of logFiles) {
+      const fp = path.join(LOGS_DIR, f);
+      const stat = fs.statSync(fp);
+      if (now - stat.mtimeMs > MAX_LOG_AGE_DAYS * 24 * 60 * 60 * 1000) {
+        fs.unlinkSync(fp);
+        logsRemoved++;
+      }
+    }
+  } catch {}
+
+  // 5. Clean orphaned temp files
+  let tempsRemoved = 0;
+  try {
+    const tmpFiles = fs.readdirSync(TMP_DIR);
+    for (const f of tmpFiles) {
+      if (f === ".gitkeep") continue;
+      const fp = path.join(TMP_DIR, f);
+      const stat = fs.statSync(fp);
+      // Remove temp files older than 1 hour
+      if (now - stat.mtimeMs > 60 * 60 * 1000) {
+        fs.unlinkSync(fp);
+        tempsRemoved++;
+      }
+    }
+  } catch {}
+
+  const summary = [
+    zombies && `${zombies} zombies fixed`,
+    expired && `${expired} expired`,
+    pruned && `${pruned} pruned`,
+    logsRemoved && `${logsRemoved} old logs`,
+    tempsRemoved && `${tempsRemoved} temp files`,
+  ].filter(Boolean);
+
+  if (summary.length) {
+    console.log(`   Cleaned: ${summary.join(", ")}`);
+  } else {
+    console.log("   Nothing to clean");
+  }
 }
 
 // ── HTTP helpers ────────────────────────────────────────────────────────────
@@ -525,7 +620,7 @@ async function spawnAgent(
       addWaMessageId(agentId, sentId);
     }
 
-    updateAgent(agentId, { status: "idle" });
+    updateAgent(agentId, { status: "idle", lastActiveAt: new Date().toISOString() });
     console.log(`  ✅ Agent ${agentId} completed`);
   } catch (err: any) {
     const errorMsg = err.stderr || err.message || "Unknown error";
@@ -536,7 +631,7 @@ async function spawnAgent(
     const sentId = await sendMessage(waMessage, replyToMessageId);
     if (sentId) addWaMessageId(agentId, sentId);
 
-    updateAgent(agentId, { status: "idle" });
+    updateAgent(agentId, { status: "idle", lastActiveAt: new Date().toISOString() });
     fs.appendFileSync(
       logFile,
       `\n--- ${new Date().toISOString()} ERROR ---\n${errorMsg}\n`
@@ -609,7 +704,7 @@ async function resumeAgent(
     const sentId = await sendMessage(waMessage, replyToMessageId);
     if (sentId) addWaMessageId(agentId, sentId);
 
-    updateAgent(agentId, { status: "idle" });
+    updateAgent(agentId, { status: "idle", lastActiveAt: new Date().toISOString() });
     console.log(`  ✅ Agent ${agentId} resume completed`);
   } catch (err: any) {
     const errorMsg = err.stderr || err.message || "Unknown error";
@@ -619,7 +714,7 @@ async function resumeAgent(
     const sentId = await sendMessage(waMessage, replyToMessageId);
     if (sentId) addWaMessageId(agentId, sentId);
 
-    updateAgent(agentId, { status: "idle" });
+    updateAgent(agentId, { status: "idle", lastActiveAt: new Date().toISOString() });
     fs.appendFileSync(
       logFile,
       `\n--- ${new Date().toISOString()} RESUME ERROR ---\n${errorMsg}\n`
@@ -764,6 +859,9 @@ async function main() {
     console.warn("⚠️ ELEVENLABS_API_KEY not set - voice messages will be skipped");
   }
 
+  // Cleanup stale state from previous runs
+  cleanupOnStartup();
+
   // Detect own ID to filter self-messages
   await detectOwnId();
 
@@ -781,6 +879,7 @@ async function main() {
 
   // Main notification loop
   let consecutiveErrors = 0;
+  let lastCleanup = Date.now();
   while (true) {
     try {
       const notif = await receiveNotification();
@@ -826,6 +925,12 @@ async function main() {
         await routeMessage(msg);
       } catch (err: any) {
         console.error(`Error routing message ${msg.idMessage}:`, err.message);
+      }
+
+      // Periodic cleanup (every 30 min)
+      if (Date.now() - lastCleanup > 30 * 60 * 1000) {
+        cleanupOnStartup();
+        lastCleanup = Date.now();
       }
 
       // Prune old processed IDs (keep last 500)
