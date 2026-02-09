@@ -1,0 +1,18 @@
+{
+  "name": "peleg-orchestra",
+  "version": "1.0.0",
+  "description": "WhatsApp Agent Command Center - command Claude Code agents via WhatsApp",
+  "main": "orchestra.ts",
+  "scripts": {
+    "start": "npx ts-node orchestra.ts",
+    "dev": "npx ts-node orchestra.ts"
+  },
+  "dependencies": {
+    "nanoid": "^3.3.7"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.3",
+    "ts-node": "^10.9.2",
+    "@types/node": "^20.11.0"
+  }
+}

@@ -1,0 +1,19 @@
+node_modules/
+dist/
+.env
+*.log
+logs/
+agents/registry.json
+tools/registry.json
+.DS_Store
+*.ogg
+*.opus
+*.mp3
+*.wav
+*.m4a
+tmp/
+
+# Claude Code
+.claude/settings.local.json
+.claude/todos.json
+.claude/projects/**/*.jsonl
