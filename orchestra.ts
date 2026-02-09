@@ -34,7 +34,7 @@ const GREEN_URL = process.env.GREEN_API_URL!;
 const GREEN_INSTANCE = process.env.GREEN_API_INSTANCE!;
 const GREEN_TOKEN = process.env.GREEN_API_TOKEN!;
 const GREEN_MEDIA_URL = process.env.GREEN_API_MEDIA_URL!;
-const ELEVENLABS_KEY = process.env.ELEVENLABS_API_KEY!;
+const GROQ_API_KEY = process.env.GROQ_API_KEY!;
 const WA_GROUP_ID = process.env.WA_GROUP_ID!;
 const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL || "3000", 10);
 const MAX_TURNS = parseInt(process.env.MAX_AGENT_TURNS || "25", 10);
@@ -449,10 +449,10 @@ async function downloadMedia(downloadUrl: string): Promise<string> {
   return filePath;
 }
 
-// ── Voice Transcription (ElevenLabs Scribe) ─────────────────────────────────
+// ── Voice Transcription (Groq whisper-large-v3) ─────────────────────────────
 
 async function transcribeAudio(filePath: string): Promise<string> {
-  console.log(`  🎙️ Transcribing: ${path.basename(filePath)}`);
+  console.log(`  🎙️ Transcribing via Groq: ${path.basename(filePath)}`);
 
   const fileBuffer = fs.readFileSync(filePath);
   const boundary = `----FormBoundary${Date.now()}`;
@@ -461,27 +461,26 @@ async function transcribeAudio(filePath: string): Promise<string> {
   const parts: Buffer[] = [];
 
   // file field
-  parts.push(
-    Buffer.from(
-      `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${fileName}"\r\nContent-Type: audio/ogg\r\n\r\n`
-    )
-  );
+  parts.push(Buffer.from(
+    `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${fileName}"\r\nContent-Type: audio/ogg\r\n\r\n`
+  ));
   parts.push(fileBuffer);
   parts.push(Buffer.from("\r\n"));
 
-  // model_id field
-  parts.push(
-    Buffer.from(
-      `--${boundary}\r\nContent-Disposition: form-data; name="model_id"\r\n\r\nscribe_v2\r\n`
-    )
-  );
+  // model field
+  parts.push(Buffer.from(
+    `--${boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\nwhisper-large-v3\r\n`
+  ));
 
-  // language_code (auto-detect)
-  parts.push(
-    Buffer.from(
-      `--${boundary}\r\nContent-Disposition: form-data; name="tag_audio_events"\r\n\r\nfalse\r\n`
-    )
-  );
+  // response_format
+  parts.push(Buffer.from(
+    `--${boundary}\r\nContent-Disposition: form-data; name="response_format"\r\n\r\njson\r\n`
+  ));
+
+  // temperature
+  parts.push(Buffer.from(
+    `--${boundary}\r\nContent-Disposition: form-data; name="temperature"\r\n\r\n0\r\n`
+  ));
 
   parts.push(Buffer.from(`--${boundary}--\r\n`));
 
@@ -490,11 +489,11 @@ async function transcribeAudio(filePath: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const req = https.request(
       {
-        hostname: "api.elevenlabs.io",
-        path: "/v1/speech-to-text",
+        hostname: "api.groq.com",
+        path: "/openai/v1/audio/transcriptions",
         method: "POST",
         headers: {
-          "xi-api-key": ELEVENLABS_KEY,
+          Authorization: `Bearer ${GROQ_API_KEY}`,
           "Content-Type": `multipart/form-data; boundary=${boundary}`,
           "Content-Length": body.length,
         },
@@ -506,14 +505,11 @@ async function transcribeAudio(filePath: string): Promise<string> {
         res.on("end", () => {
           try {
             const parsed = JSON.parse(data);
-            const text = parsed.text || parsed.transcript || "";
+            const text = parsed.text || "";
             console.log(
               `  ✅ Transcribed: "${text.slice(0, 80)}${text.length > 80 ? "..." : ""}"`
             );
-            // Clean up temp file
-            try {
-              fs.unlinkSync(filePath);
-            } catch {}
+            try { fs.unlinkSync(filePath); } catch {}
             resolve(text);
           } catch {
             console.error("Transcription parse error:", data.slice(0, 200));
@@ -855,8 +851,8 @@ async function main() {
     console.error("   Create the WhatsApp group first, then set the ID");
     process.exit(1);
   }
-  if (!ELEVENLABS_KEY) {
-    console.warn("⚠️ ELEVENLABS_API_KEY not set - voice messages will be skipped");
+  if (!GROQ_API_KEY) {
+    console.warn("⚠️ GROQ_API_KEY not set - voice messages will be skipped");
   }
 
   // Cleanup stale state from previous runs

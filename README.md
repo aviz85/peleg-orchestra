@@ -2,7 +2,7 @@
 
 A WhatsApp-based command center for orchestrating Claude Code agents. Send a message to a WhatsApp group and a Claude Code agent spawns to handle it. Reply to an agent's message and it resumes with full context. Send a voice message and it gets transcribed and processed automatically.
 
-![Yam Peleg's original WhatsApp agent system](screenshot.png)
+<img src="screenshot.png" alt="Yam Peleg's original WhatsApp agent system" width="400">
 
 ## Inspiration
 
@@ -27,7 +27,7 @@ WhatsApp Group
 
 1. **New message** → 👀 reaction → spawns a new `claude -p` agent → ⚡ reaction while working → responds in group
 2. **Reply to agent** → resumes that agent's session via `claude -p --resume`
-3. **Voice message** → downloaded, transcribed via ElevenLabs Scribe, then processed as text
+3. **Voice message** → downloaded, transcribed via Groq whisper-large-v3, then processed as text
 4. **Agent output** → sent back to the WhatsApp group, tagged with the agent ID
 5. **Reply routing** → each sent message ID is tracked, so replies route back to the correct agent
 
@@ -36,7 +36,7 @@ WhatsApp Group
 - [Node.js](https://nodejs.org/) (v18+)
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed globally
 - A [Green API](https://green-api.com/) account with an active WhatsApp instance
-- (Optional) An [ElevenLabs](https://elevenlabs.io/) API key for voice transcription
+- (Optional) A [Groq](https://console.groq.com/) API key for voice transcription
 
 ## Installation
 
@@ -63,11 +63,11 @@ npm start
 4. Create a WhatsApp group (or use the Green API `createGroup` endpoint)
 5. Set the group ID in `WA_GROUP_ID`
 
-### Setting up ElevenLabs (optional, for voice)
+### Setting up Groq (optional, for voice)
 
-1. Sign up at [elevenlabs.io](https://elevenlabs.io/)
-2. Get your API key from the dashboard
-3. Set it in `ELEVENLABS_API_KEY`
+1. Sign up at [console.groq.com](https://console.groq.com/)
+2. Create an API key
+3. Set it in `GROQ_API_KEY`
 
 ## Usage
 
@@ -105,7 +105,7 @@ peleg-orchestra/
 | `GREEN_API_INSTANCE` | Green API instance ID | Yes |
 | `GREEN_API_TOKEN` | Green API token | Yes |
 | `WA_GROUP_ID` | WhatsApp group ID (`...@g.us`) | Yes |
-| `ELEVENLABS_API_KEY` | ElevenLabs API key | No (voice only) |
+| `GROQ_API_KEY` | Groq API key (whisper-large-v3) | No (voice only) |
 | `POLL_INTERVAL` | Polling interval in ms (default: 3000) | No |
 | `MAX_AGENT_TURNS` | Max agent turns per run (default: 25) | No |
 
