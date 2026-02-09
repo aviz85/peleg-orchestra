@@ -35,7 +35,9 @@ WhatsApp Group
 
 - [Node.js](https://nodejs.org/) (v18+)
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed globally
-- A [Green API](https://green-api.com/) account with an active WhatsApp instance
+- A WhatsApp API provider — one of:
+  - [Green API](https://green-api.com/) — cloud-hosted, used by default
+  - [WAHA](https://waha.devlike.pro/) — self-hosted on Docker, but **requires a paid API key even for local use** (free tier cannot receive notifications)
 - (Optional) A [Groq](https://console.groq.com/) API key for voice transcription
 
 ## Installation
