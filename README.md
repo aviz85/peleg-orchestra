@@ -2,6 +2,8 @@
 
 A WhatsApp-based command center for orchestrating Claude Code agents. Send a message to a WhatsApp group and a Claude Code agent spawns to handle it. Reply to an agent's message and it resumes with full context. Send a voice message and it gets transcribed and processed automatically.
 
+![Yam Peleg's original WhatsApp agent system](screenshot.png)
+
 ## Inspiration
 
 This project is inspired by [Yam Peleg's tweet](https://x.com/Yampeleg/status/2020624600246481263) demonstrating a WhatsApp group where you command Claude Code agents via messages.
