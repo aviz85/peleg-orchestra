@@ -105,9 +105,53 @@ peleg-orchestra/
 | `GREEN_API_INSTANCE` | Green API instance ID | Yes |
 | `GREEN_API_TOKEN` | Green API token | Yes |
 | `WA_GROUP_ID` | WhatsApp group ID (`...@g.us`) | Yes |
+| `ALLOWED_SENDERS` | Comma-separated WhatsApp IDs to whitelist | **Strongly recommended** |
 | `GROQ_API_KEY` | Groq API key (whisper-large-v3) | No (voice only) |
 | `POLL_INTERVAL` | Polling interval in ms (default: 3000) | No |
 | `MAX_AGENT_TURNS` | Max agent turns per run (default: 25) | No |
+
+## 🚨 Security Warning
+
+> **This system spawns Claude Code agents with `bypassPermissions` — full, unrestricted access to your machine. Any message that reaches the orchestrator WILL execute as a fully autonomous agent that can read, write, delete, and run anything.**
+
+### Attack surface
+
+This is not a theoretical risk. Understand what you're exposing:
+
+| Vector | Risk | Mitigation |
+|--------|------|------------|
+| **Unauthorized group member** | Anyone in the WhatsApp group can command agents | Set `ALLOWED_SENDERS` whitelist |
+| **Compromised WhatsApp API credentials** | If your Green API / WAHA token leaks, an attacker can send messages as any sender, **bypassing the whitelist entirely** | Guard `.env` like a root password. Never commit it. Rotate tokens regularly |
+| **Compromised WhatsApp account** | If your phone is compromised, attacker has full access | Use 2FA on WhatsApp, secure your phone |
+| **WAHA/Green API server compromise** | If the API provider is breached, messages can be injected | Self-host WAHA on trusted infrastructure if possible |
+| **Agent escape** | An agent could modify the orchestrator itself, disable security, or exfiltrate data | Run on an isolated machine / VM with limited network access |
+| **Prompt injection** | A crafted message could trick the agent into harmful actions | Agents inherit Claude's safety, but `bypassPermissions` removes guardrails |
+
+### Sender Whitelist (minimum required)
+
+Set `ALLOWED_SENDERS` in your `.env` to restrict who can command agents:
+
+```env
+ALLOWED_SENDERS=972501234567@c.us,972509876543@c.us
+```
+
+Only messages from these WhatsApp IDs will be processed. All others are blocked and logged.
+
+**Important:** The whitelist checks the sender ID reported by the WhatsApp API. If an attacker has your API credentials (Green API token or WAHA endpoint), they can forge the sender ID and bypass the whitelist. The whitelist protects against unauthorized group members, NOT against API credential theft.
+
+### Recommendations
+
+- **Never run on a machine with sensitive data** — treat the host as potentially compromised
+- **Use a dedicated VM or container** — isolate the orchestrator from your main environment
+- **Guard your `.env` like root credentials** — anyone with the Green API token owns your machine
+- **Keep the group to one member (yourself)** — minimize attack surface
+- **Monitor the console** — blocked and authorized messages are all logged
+- **Rotate API tokens regularly** — especially if you suspect a leak
+- **Consider network isolation** — restrict what agents can reach (no SSH keys, no cloud credentials on the host)
+
+### What happens if an unauthorized message is received?
+
+The orchestra blocks it, logs the sender's name and ID to console, and sends a rejection message to the group: `🚫 Unauthorized sender`.
 
 ## Disclaimer
 

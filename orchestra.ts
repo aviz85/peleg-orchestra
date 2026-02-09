@@ -38,6 +38,9 @@ const GROQ_API_KEY = process.env.GROQ_API_KEY!;
 const WA_GROUP_ID = process.env.WA_GROUP_ID!;
 const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL || "3000", 10);
 const MAX_TURNS = parseInt(process.env.MAX_AGENT_TURNS || "25", 10);
+const ALLOWED_SENDERS: Set<string> = new Set(
+  (process.env.ALLOWED_SENDERS || "").split(",").map(s => s.trim()).filter(Boolean)
+);
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -762,8 +765,18 @@ async function routeMessage(msg: WAMessage): Promise<void> {
   if (msgText.startsWith("🤖") || msgText.startsWith("🎙️") || msgText.startsWith("⚠️") || msgText.startsWith("🎼")) return;
 
   const senderName = msg.senderName || "Unknown";
+  const senderId = msg.senderId || "";
+
+  // ── Security: sender whitelist ──
+  if (ALLOWED_SENDERS.size > 0 && !ALLOWED_SENDERS.has(senderId)) {
+    console.log(`\n🚫 BLOCKED message from unauthorized sender: ${senderName} (${senderId})`);
+    console.log(`   Text: "${msgText.slice(0, 100)}"`);
+    await sendMessage(`🚫 Unauthorized sender: ${senderName}. Only whitelisted numbers can command agents.`, msg.idMessage);
+    return;
+  }
+
   console.log(
-    `\n📨 Message from ${senderName}: type=${msg.typeMessage}`
+    `\n📨 Message from ${senderName} (${senderId}): type=${msg.typeMessage}`
   );
 
   // Acknowledge receipt
@@ -853,6 +866,12 @@ async function main() {
   }
   if (!GROQ_API_KEY) {
     console.warn("⚠️ GROQ_API_KEY not set - voice messages will be skipped");
+  }
+  if (ALLOWED_SENDERS.size === 0) {
+    console.warn("⛔ WARNING: ALLOWED_SENDERS is empty — ALL group members can command agents!");
+    console.warn("   Set ALLOWED_SENDERS in .env to restrict access (e.g. 972501234567@c.us)");
+  } else {
+    console.log(`🔒 Sender whitelist: ${Array.from(ALLOWED_SENDERS).join(", ")}`);
   }
 
   // Cleanup stale state from previous runs
