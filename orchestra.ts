@@ -305,12 +305,12 @@ function notificationToMessage(notif: Notification): WAMessage | null {
   return msg;
 }
 
-async function sendReaction(messageId: string, emoji: string): Promise<void> {
+async function sendAck(quotedMessageId: string, emoji: string): Promise<void> {
   try {
-    await httpRequest(greenApiUrl("sendReaction"), {
+    await httpRequest(greenApiUrl("sendMessage"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chatId: WA_GROUP_ID, idMessage: messageId, reaction: emoji }),
+      body: JSON.stringify({ chatId: WA_GROUP_ID, message: emoji, quotedMessageId }),
     });
   } catch {}
 }
@@ -465,7 +465,7 @@ async function spawnAgent(
   console.log(`     Prompt: "${prompt.slice(0, 80)}${prompt.length > 80 ? "..." : ""}"`);
 
   // React with ⚡ to show agent is working
-  if (replyToMessageId) await sendReaction(replyToMessageId, "⚡");
+  if (replyToMessageId) await sendAck(replyToMessageId, "⚡ working...");
 
   try {
     const args = [
@@ -559,7 +559,7 @@ async function resumeAgent(
   console.log(`     Reply: "${replyText.slice(0, 80)}${replyText.length > 80 ? "..." : ""}"`);
 
   // React with ⚡ to show agent is working
-  if (replyToMessageId) await sendReaction(replyToMessageId, "⚡");
+  if (replyToMessageId) await sendAck(replyToMessageId, "⚡ working...");
 
   try {
     const args = [
@@ -675,8 +675,8 @@ async function routeMessage(msg: WAMessage): Promise<void> {
     `\n📨 Message from ${senderName}: type=${msg.typeMessage}`
   );
 
-  // React with 👀 to acknowledge receipt
-  await sendReaction(msg.idMessage, "👀");
+  // Acknowledge receipt
+  await sendAck(msg.idMessage, "👀 received, spawning agent...");
 
   // ── Reply to an agent message ──
   if (
