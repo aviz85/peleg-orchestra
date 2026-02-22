@@ -42,12 +42,22 @@ const ALLOWED_SENDERS: Set<string> = new Set(
   (process.env.ALLOWED_SENDERS || "").split(",").map(s => s.trim()).filter(Boolean)
 );
 
+// Telegram config
+const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN || "";
+const TG_CHAT_ID = process.env.TG_CHAT_ID || "";
+const TG_ENABLED = !!(TG_BOT_TOKEN && TG_CHAT_ID);
+const TG_ALLOWED_SENDERS: Set<string> = new Set(
+  (process.env.TG_ALLOWED_SENDERS || "").split(",").map(s => s.trim()).filter(Boolean)
+);
+
 // ── Types ───────────────────────────────────────────────────────────────────
 
 interface AgentRecord {
   sessionId: string;
   status: "running" | "idle" | "done";
+  channel: "wa" | "tg";
   waMessageIds: string[];
+  tgMessageIds: number[];
   parentAgentId: string | null;
   prompt: string;
   pid: number | null;
@@ -115,13 +125,16 @@ function saveRegistry(reg: AgentRegistry) {
   fs.writeFileSync(REGISTRY_PATH, JSON.stringify(reg, null, 2));
 }
 
-function createAgent(prompt: string, parentId: string | null = null): string {
+function createAgent(prompt: string, parentId: string | null = null, channel: "wa" | "tg" = "wa"): string {
   const reg = loadRegistry();
-  const id = `agent-claude-wa-${shortId()}`;
+  const prefix = channel === "tg" ? "agent-claude-tg" : "agent-claude-wa";
+  const id = `${prefix}-${shortId()}`;
   reg[id] = {
     sessionId: uuid(),
     status: "idle",
+    channel,
     waMessageIds: [],
+    tgMessageIds: [],
     parentAgentId: parentId,
     prompt,
     pid: null,
@@ -153,6 +166,22 @@ function findAgentByWaMessageId(messageId: string): string | null {
   const reg = loadRegistry();
   for (const [agentId, agent] of Object.entries(reg)) {
     if (agent.waMessageIds.includes(messageId)) return agentId;
+  }
+  return null;
+}
+
+function addTgMessageId(agentId: string, messageId: number) {
+  const reg = loadRegistry();
+  if (!reg[agentId]) return;
+  if (!reg[agentId].tgMessageIds) reg[agentId].tgMessageIds = [];
+  reg[agentId].tgMessageIds.push(messageId);
+  saveRegistry(reg);
+}
+
+function findAgentByTgMessageId(messageId: number): string | null {
+  const reg = loadRegistry();
+  for (const [agentId, agent] of Object.entries(reg)) {
+    if (agent.tgMessageIds && agent.tgMessageIds.includes(messageId)) return agentId;
   }
   return null;
 }
@@ -452,6 +481,71 @@ async function downloadMedia(downloadUrl: string): Promise<string> {
   return filePath;
 }
 
+// ── Telegram Module ──────────────────────────────────────────────────────────
+
+function tgApiUrl(method: string): string {
+  return `https://api.telegram.org/bot${TG_BOT_TOKEN}/${method}`;
+}
+
+async function tgGetUpdates(offset: number): Promise<{ ok: boolean; result: any[] }> {
+  const url = tgApiUrl("getUpdates") + `?offset=${offset}&timeout=5&allowed_updates=["message"]`;
+  const res = await httpRequest(url);
+  try {
+    return JSON.parse(res.body);
+  } catch {
+    return { ok: false, result: [] };
+  }
+}
+
+async function tgSendTyping(chatId: string): Promise<void> {
+  try {
+    await httpRequest(tgApiUrl("sendChatAction"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, action: "typing" }),
+    });
+  } catch {}
+}
+
+async function tgSendMessage(chatId: string, text: string, replyToMessageId?: number): Promise<number | null> {
+  const payload: any = { chat_id: chatId, text };
+  if (replyToMessageId) {
+    payload.reply_parameters = { message_id: replyToMessageId };
+  }
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const res = await httpRequest(tgApiUrl("sendMessage"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = JSON.parse(res.body);
+      if (data.ok && data.result?.message_id) return data.result.message_id;
+      console.warn(`  ⚠️ tgSendMessage attempt ${attempt}/3: ${JSON.stringify(data).slice(0, 200)}`);
+    } catch (err: any) {
+      console.warn(`  ⚠️ tgSendMessage attempt ${attempt}/3 failed: ${err.message}`);
+    }
+    if (attempt < 3) await sleep(2000 * attempt);
+  }
+  console.error("TG send failed after 3 attempts");
+  return null;
+}
+
+async function tgDownloadVoice(fileId: string): Promise<string> {
+  // Step 1: get file path from Telegram
+  const fileRes = await httpRequest(tgApiUrl("getFile") + `?file_id=${fileId}`);
+  const fileData = JSON.parse(fileRes.body);
+  if (!fileData.ok || !fileData.result?.file_path) {
+    throw new Error("Could not get TG file path");
+  }
+  const filePath = fileData.result.file_path;
+  const downloadUrl = `https://api.telegram.org/file/bot${TG_BOT_TOKEN}/${filePath}`;
+  const ext = path.extname(filePath) || ".ogg";
+  const dest = path.join(TMP_DIR, `tg_voice_${Date.now()}${ext}`);
+  await downloadFile(downloadUrl, dest);
+  return dest;
+}
+
 // ── Voice Transcription (Groq whisper-large-v3) ─────────────────────────────
 
 async function transcribeAudio(filePath: string): Promise<string> {
@@ -531,6 +625,39 @@ async function transcribeAudio(filePath: string): Promise<string> {
   });
 }
 
+// ── Channel-aware send helpers ──────────────────────────────────────────────
+
+async function sendChannelMessage(
+  channel: "wa" | "tg",
+  text: string,
+  replyTo?: string | number
+): Promise<string | number | null> {
+  if (channel === "tg") {
+    return tgSendMessage(TG_CHAT_ID, text, replyTo as number | undefined);
+  }
+  return sendMessage(text, replyTo as string | undefined);
+}
+
+async function sendChannelAck(
+  channel: "wa" | "tg",
+  msgId: string | number,
+  emoji: string
+): Promise<void> {
+  if (channel === "tg") {
+    await tgSendTyping(TG_CHAT_ID);
+  } else {
+    await sendAck(msgId as string, emoji);
+  }
+}
+
+function addChannelMessageId(agentId: string, channel: "wa" | "tg", messageId: string | number) {
+  if (channel === "tg") {
+    addTgMessageId(agentId, messageId as number);
+  } else {
+    addWaMessageId(agentId, messageId as string);
+  }
+}
+
 // ── Agent Spawner ───────────────────────────────────────────────────────────
 
 function getSystemPrompt(agentId: string): string {
@@ -546,20 +673,21 @@ function getSystemPrompt(agentId: string): string {
 async function spawnAgent(
   agentId: string,
   prompt: string,
-  replyToMessageId?: string
+  replyToMessageId?: string | number
 ): Promise<void> {
   const agent = getAgent(agentId);
   if (!agent) return;
 
+  const ch = agent.channel || "wa";
   updateAgent(agentId, { status: "running" });
   const systemPrompt = getSystemPrompt(agentId);
   const logFile = path.join(LOGS_DIR, `${agentId}.log`);
 
-  console.log(`  🚀 Spawning agent: ${agentId}`);
+  console.log(`  🚀 Spawning agent: ${agentId} [${ch}]`);
   console.log(`     Prompt: "${prompt.slice(0, 80)}${prompt.length > 80 ? "..." : ""}"`);
 
   // React with ⚡ to show agent is working
-  if (replyToMessageId) await sendAck(replyToMessageId, "⚡ working...");
+  if (replyToMessageId) await sendChannelAck(ch, replyToMessageId, "⚡ working...");
 
   try {
     const args = [
@@ -606,17 +734,18 @@ async function spawnAgent(
       `\n--- ${new Date().toISOString()} ---\nPrompt: ${prompt}\nOutput: ${output}\n`
     );
 
-    // Truncate if too long for WhatsApp
-    if (output.length > 3500) {
-      output = output.slice(0, 3500) + "\n\n... (truncated)";
+    // Truncate if too long for messaging
+    const maxLen = ch === "tg" ? 4000 : 3500;
+    if (output.length > maxLen) {
+      output = output.slice(0, maxLen) + "\n\n... (truncated)";
     }
 
-    // Send to WhatsApp
-    const waMessage = `🤖 *${agentId}*\n\n${output}`;
-    const sentId = await sendMessage(waMessage, replyToMessageId);
+    // Send response on the same channel
+    const responseMsg = `🤖 *${agentId}*\n\n${output}`;
+    const sentId = await sendChannelMessage(ch, responseMsg, replyToMessageId);
 
     if (sentId) {
-      addWaMessageId(agentId, sentId);
+      addChannelMessageId(agentId, ch, sentId);
     }
 
     updateAgent(agentId, { status: "idle", lastActiveAt: new Date().toISOString() });
@@ -625,10 +754,10 @@ async function spawnAgent(
     const errorMsg = err.stderr || err.message || "Unknown error";
     console.error(`  ❌ Agent ${agentId} error:`, errorMsg.slice(0, 200));
 
-    // Still try to report error to WhatsApp
-    const waMessage = `🤖 *${agentId}*\n\n❌ Error: ${errorMsg.slice(0, 500)}`;
-    const sentId = await sendMessage(waMessage, replyToMessageId);
-    if (sentId) addWaMessageId(agentId, sentId);
+    // Still try to report error
+    const responseMsg = `🤖 *${agentId}*\n\n❌ Error: ${errorMsg.slice(0, 500)}`;
+    const sentId = await sendChannelMessage(ch, responseMsg, replyToMessageId);
+    if (sentId) addChannelMessageId(agentId, ch, sentId);
 
     updateAgent(agentId, { status: "idle", lastActiveAt: new Date().toISOString() });
     fs.appendFileSync(
@@ -641,19 +770,20 @@ async function spawnAgent(
 async function resumeAgent(
   agentId: string,
   replyText: string,
-  replyToMessageId?: string
+  replyToMessageId?: string | number
 ): Promise<void> {
   const agent = getAgent(agentId);
   if (!agent) return;
 
+  const ch = agent.channel || "wa";
   updateAgent(agentId, { status: "running" });
   const logFile = path.join(LOGS_DIR, `${agentId}.log`);
 
-  console.log(`  🔄 Resuming agent: ${agentId}`);
+  console.log(`  🔄 Resuming agent: ${agentId} [${ch}]`);
   console.log(`     Reply: "${replyText.slice(0, 80)}${replyText.length > 80 ? "..." : ""}"`);
 
   // React with ⚡ to show agent is working
-  if (replyToMessageId) await sendAck(replyToMessageId, "⚡ working...");
+  if (replyToMessageId) await sendChannelAck(ch, replyToMessageId, "⚡ working...");
 
   try {
     const args = [
@@ -695,13 +825,14 @@ async function resumeAgent(
       `\n--- ${new Date().toISOString()} RESUME ---\nReply: ${replyText}\nOutput: ${output}\n`
     );
 
-    if (output.length > 3500) {
-      output = output.slice(0, 3500) + "\n\n... (truncated)";
+    const maxLen = ch === "tg" ? 4000 : 3500;
+    if (output.length > maxLen) {
+      output = output.slice(0, maxLen) + "\n\n... (truncated)";
     }
 
-    const waMessage = `🤖 *${agentId}*\n\n${output}`;
-    const sentId = await sendMessage(waMessage, replyToMessageId);
-    if (sentId) addWaMessageId(agentId, sentId);
+    const responseMsg = `🤖 *${agentId}*\n\n${output}`;
+    const sentId = await sendChannelMessage(ch, responseMsg, replyToMessageId);
+    if (sentId) addChannelMessageId(agentId, ch, sentId);
 
     updateAgent(agentId, { status: "idle", lastActiveAt: new Date().toISOString() });
     console.log(`  ✅ Agent ${agentId} resume completed`);
@@ -709,9 +840,9 @@ async function resumeAgent(
     const errorMsg = err.stderr || err.message || "Unknown error";
     console.error(`  ❌ Agent ${agentId} resume error:`, errorMsg.slice(0, 200));
 
-    const waMessage = `🤖 *${agentId}*\n\n❌ Error: ${errorMsg.slice(0, 500)}`;
-    const sentId = await sendMessage(waMessage, replyToMessageId);
-    if (sentId) addWaMessageId(agentId, sentId);
+    const responseMsg = `🤖 *${agentId}*\n\n❌ Error: ${errorMsg.slice(0, 500)}`;
+    const sentId = await sendChannelMessage(ch, responseMsg, replyToMessageId);
+    if (sentId) addChannelMessageId(agentId, ch, sentId);
 
     updateAgent(agentId, { status: "idle", lastActiveAt: new Date().toISOString() });
     fs.appendFileSync(
@@ -845,12 +976,114 @@ async function routeMessage(msg: WAMessage): Promise<void> {
   await spawnAgent(agentId, text, msg.idMessage);
 }
 
+// ── Telegram Message Router ──────────────────────────────────────────────────
+
+const processedTgUpdates = new Set<number>();
+let tgBotId: number | null = null;
+
+async function detectTgBotId(): Promise<void> {
+  if (!TG_ENABLED) return;
+  try {
+    const res = await httpRequest(tgApiUrl("getMe"));
+    const data = JSON.parse(res.body);
+    if (data.ok && data.result?.id) {
+      tgBotId = data.result.id;
+      console.log(`🤖 Telegram bot: @${data.result.username} (${tgBotId})`);
+    }
+  } catch (err: any) {
+    console.warn("Could not detect TG bot ID:", err.message);
+  }
+}
+
+async function routeTelegramMessage(update: any): Promise<void> {
+  const msg = update.message;
+  if (!msg) return;
+
+  const updateId = update.update_id;
+  if (processedTgUpdates.has(updateId)) return;
+  processedTgUpdates.add(updateId);
+
+  // Only process messages from our chat
+  const chatId = String(msg.chat?.id || "");
+  if (chatId !== TG_CHAT_ID) return;
+
+  // Skip messages from our bot
+  if (tgBotId && msg.from?.id === tgBotId) return;
+
+  const senderId = String(msg.from?.id || "");
+  const senderName = msg.from?.first_name || msg.from?.username || "Unknown";
+  const msgText = msg.text || msg.caption || "";
+
+  // Skip our own agent responses
+  if (msgText.startsWith("🤖") || msgText.startsWith("🎙️") || msgText.startsWith("⚠️") || msgText.startsWith("⚡")) return;
+
+  // ── Security: sender whitelist ──
+  if (TG_ALLOWED_SENDERS.size > 0 && !TG_ALLOWED_SENDERS.has(senderId)) {
+    console.log(`\n🚫 TG BLOCKED from unauthorized sender: ${senderName} (${senderId})`);
+    await tgSendMessage(TG_CHAT_ID, `🚫 Unauthorized sender: ${senderName}. Only whitelisted user IDs can command agents.`, msg.message_id);
+    return;
+  }
+
+  console.log(`\n📨 [TG] Message from ${senderName} (${senderId})`);
+
+  // Show typing indicator
+  await tgSendTyping(TG_CHAT_ID);
+
+  // ── Reply to an agent message ──
+  if (msg.reply_to_message?.message_id) {
+    const repliedToId = msg.reply_to_message.message_id;
+    const agentId = findAgentByTgMessageId(repliedToId);
+
+    if (agentId && msgText) {
+      console.log(`  → [TG] Routing reply to agent: ${agentId}`);
+      await resumeAgent(agentId, msgText, msg.message_id);
+      return;
+    }
+    // If reply not to agent, treat as new message
+    if (msgText) {
+      console.log(`  → [TG] Reply not to agent, spawning new`);
+      const newAgentId = createAgent(msgText, null, "tg");
+      await spawnAgent(newAgentId, msgText, msg.message_id);
+      return;
+    }
+  }
+
+  // ── Voice message ──
+  const voice = msg.voice || msg.audio;
+  if (voice?.file_id) {
+    console.log(`  🎤 [TG] Voice message detected, downloading...`);
+    try {
+      const audioPath = await tgDownloadVoice(voice.file_id);
+      const transcription = await transcribeAudio(audioPath);
+
+      if (transcription.trim()) {
+        await tgSendMessage(TG_CHAT_ID, `🎙️ *Transcription:*\n${transcription.slice(0, 500)}`, msg.message_id);
+        const agentId = createAgent(transcription, null, "tg");
+        await spawnAgent(agentId, transcription, msg.message_id);
+      } else {
+        await tgSendMessage(TG_CHAT_ID, "⚠️ Could not transcribe voice message", msg.message_id);
+      }
+    } catch (err: any) {
+      console.error("[TG] Voice handling error:", err.message);
+      await tgSendMessage(TG_CHAT_ID, "⚠️ Voice transcription failed", msg.message_id);
+    }
+    return;
+  }
+
+  // ── Regular text → spawn new agent ──
+  if (!msgText.trim()) return;
+
+  console.log(`  → [TG] New command, spawning agent`);
+  const agentId = createAgent(msgText, null, "tg");
+  await spawnAgent(agentId, msgText, msg.message_id);
+}
+
 // ── Main Loop ───────────────────────────────────────────────────────────────
 
 async function main() {
   console.log("╔══════════════════════════════════════════════╗");
   console.log("║   🎼 Peleg Orchestra - Command Center       ║");
-  console.log("║   WhatsApp Agent Commander                   ║");
+  console.log("║   WhatsApp + Telegram Agent Commander        ║");
   console.log("╚══════════════════════════════════════════════╝");
   console.log();
 
@@ -871,14 +1104,27 @@ async function main() {
     console.warn("⛔ WARNING: ALLOWED_SENDERS is empty — ALL group members can command agents!");
     console.warn("   Set ALLOWED_SENDERS in .env to restrict access (e.g. 972501234567@c.us)");
   } else {
-    console.log(`🔒 Sender whitelist: ${Array.from(ALLOWED_SENDERS).join(", ")}`);
+    console.log(`🔒 WA sender whitelist: ${Array.from(ALLOWED_SENDERS).join(", ")}`);
+  }
+
+  // Telegram status
+  if (TG_ENABLED) {
+    console.log(`✈️ Telegram ENABLED (chat ${TG_CHAT_ID})`);
+    if (TG_ALLOWED_SENDERS.size === 0) {
+      console.warn("⛔ WARNING: TG_ALLOWED_SENDERS is empty — ALL chat members can command agents!");
+    } else {
+      console.log(`🔒 TG sender whitelist: ${Array.from(TG_ALLOWED_SENDERS).join(", ")}`);
+    }
+  } else {
+    console.log("✈️ Telegram DISABLED (set TG_BOT_TOKEN + TG_CHAT_ID to enable)");
   }
 
   // Cleanup stale state from previous runs
   cleanupOnStartup();
 
-  // Detect own ID to filter self-messages
+  // Detect own IDs to filter self-messages
   await detectOwnId();
+  await detectTgBotId();
 
   // Verify Claude CLI is available
   try {
@@ -889,10 +1135,46 @@ async function main() {
     process.exit(1);
   }
 
-  console.log(`📡 Listening on group ${WA_GROUP_ID} (notification queue)`);
+  console.log(`📡 Listening on WA group ${WA_GROUP_ID}`);
+  if (TG_ENABLED) console.log(`📡 Listening on TG chat ${TG_CHAT_ID}`);
   console.log("🎧 Waiting for commands...\n");
 
-  // Main notification loop
+  // Start Telegram polling loop in parallel (non-blocking)
+  let tgOffset = 0;
+  async function pollTelegram() {
+    if (!TG_ENABLED) return;
+    let tgErrors = 0;
+    while (true) {
+      try {
+        const data = await tgGetUpdates(tgOffset);
+        if (data.ok && data.result.length > 0) {
+          for (const update of data.result) {
+            tgOffset = update.update_id + 1;
+            try {
+              await routeTelegramMessage(update);
+            } catch (err: any) {
+              console.error(`[TG] Error routing update ${update.update_id}:`, err.message);
+            }
+          }
+        }
+        tgErrors = 0;
+      } catch (err: any) {
+        tgErrors++;
+        console.error(`[TG] Poll error (${tgErrors}):`, err.message);
+        if (tgErrors > 10) {
+          console.error("[TG] Too many errors, waiting 30s...");
+          await sleep(30000);
+          tgErrors = 0;
+        }
+        await sleep(2000);
+      }
+    }
+  }
+
+  // Fire and forget TG polling
+  pollTelegram().catch(err => console.error("[TG] Fatal polling error:", err));
+
+  // Main WA notification loop
   let consecutiveErrors = 0;
   let lastCleanup = Date.now();
   while (true) {
@@ -953,6 +1235,11 @@ async function main() {
         const arr = Array.from(processedMessages);
         const toRemove = arr.slice(0, arr.length - 500);
         toRemove.forEach((id) => processedMessages.delete(id));
+      }
+      if (processedTgUpdates.size > 500) {
+        const arr = Array.from(processedTgUpdates);
+        const toRemove = arr.slice(0, arr.length - 500);
+        toRemove.forEach((id) => processedTgUpdates.delete(id));
       }
     } catch (err: any) {
       consecutiveErrors++;

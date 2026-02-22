@@ -1,6 +1,6 @@
 # Peleg Orchestra
 
-A WhatsApp-based command center for orchestrating Claude Code agents. Send a message to a WhatsApp group and a Claude Code agent spawns to handle it. Reply to an agent's message and it resumes with full context. Send a voice message and it gets transcribed and processed automatically.
+A WhatsApp + Telegram command center for orchestrating Claude Code agents. Send a message to a WhatsApp group or Telegram chat and a Claude Code agent spawns to handle it. Reply to an agent's message and it resumes with full context. Send a voice message and it gets transcribed and processed automatically.
 
 <img src="screenshot.png" alt="Yam Peleg's original WhatsApp agent system" width="400">
 
@@ -13,23 +13,25 @@ This project is inspired by [Yam Peleg's tweet](https://x.com/Yampeleg/status/20
 ## How It Works
 
 ```
-WhatsApp Group
-      ↕  (notification queue via Green API)
-  orchestra.ts
-      ↕
-  ┌───┴────┐
-  │ Router │
-  └───┬────┘
-      ├── Reply?  → find agent by quoted message → resume session
-      ├── Voice?  → download → transcribe → process as text
-      └── New?    → spawn new Claude Code agent
+WhatsApp Group          Telegram Chat
+      ↕                       ↕
+  (Green API)          (Bot long-poll)
+      ↕                       ↕
+      └──────── orchestra.ts ─┘
+                    ↕
+              ┌───┴────┐
+              │ Router │
+              └───┬────┘
+                  ├── Reply?  → find agent by message ID → resume session
+                  ├── Voice?  → download → transcribe → process as text
+                  └── New?    → spawn new Claude Code agent
 ```
 
-1. **New message** → 👀 reaction → spawns a new `claude -p` agent → ⚡ reaction while working → responds in group
+1. **New message** (WA or TG) → spawns a new `claude -p` agent → responds on the same channel
 2. **Reply to agent** → resumes that agent's session via `claude -p --resume`
 3. **Voice message** → downloaded, transcribed via Groq whisper-large-v3, then processed as text
-4. **Agent output** → sent back to the WhatsApp group, tagged with the agent ID
-5. **Reply routing** → each sent message ID is tracked, so replies route back to the correct agent
+4. **Agent output** → sent back to the originating channel, tagged with the agent ID
+5. **Reply routing** → each sent message ID is tracked per channel, so replies route back to the correct agent
 
 ## Prerequisites
 
@@ -39,6 +41,7 @@ WhatsApp Group
   - [Green API](https://green-api.com/) — cloud-hosted, used by default
   - [WAHA](https://waha.devlike.pro/) — self-hosted on Docker. **Note:** requires an API key for client-server authentication, even when running locally
 - (Optional) A [Groq](https://console.groq.com/) API key for voice transcription
+- (Optional) A [Telegram Bot](https://t.me/BotFather) token for Telegram channel
 
 ## Installation
 
@@ -71,17 +74,27 @@ npm start
 2. Create an API key
 3. Set it in `GROQ_API_KEY`
 
+### Setting up Telegram (optional)
+
+1. Message [@BotFather](https://t.me/BotFather) on Telegram → `/newbot`
+2. Copy the bot token to `TG_BOT_TOKEN`
+3. Send a message to your bot, then run: `curl https://api.telegram.org/bot<TOKEN>/getUpdates`
+4. Find `chat.id` in the response → set it in `TG_CHAT_ID`
+5. Set `TG_ALLOWED_SENDERS` to your numeric Telegram user ID (from the same response, `from.id`)
+
 ## Usage
 
 ```bash
 npm start
 ```
 
-Then send messages to your WhatsApp group:
+Then send messages to your WhatsApp group or Telegram chat:
 
 - **Text message** → a new agent spawns and responds
 - **Reply to an agent's message** → the same agent continues the conversation
 - **Voice message** → gets transcribed, then an agent processes it
+
+Works identically on both WhatsApp and Telegram. Telegram shows a "typing..." indicator while agents work.
 
 ## Project Structure
 
@@ -109,6 +122,9 @@ peleg-orchestra/
 | `WA_GROUP_ID` | WhatsApp group ID (`...@g.us`) | Yes |
 | `ALLOWED_SENDERS` | Comma-separated WhatsApp IDs to whitelist | **Strongly recommended** |
 | `GROQ_API_KEY` | Groq API key (whisper-large-v3) | No (voice only) |
+| `TG_BOT_TOKEN` | Telegram bot token from @BotFather | No |
+| `TG_CHAT_ID` | Telegram chat ID to listen on | No (TG disabled if empty) |
+| `TG_ALLOWED_SENDERS` | Comma-separated Telegram user IDs | **Recommended if TG enabled** |
 | `POLL_INTERVAL` | Polling interval in ms (default: 3000) | No |
 | `MAX_AGENT_TURNS` | Max agent turns per run (default: 25) | No |
 
@@ -122,8 +138,8 @@ This is not a theoretical risk. Understand what you're exposing:
 
 | Vector | Risk | Mitigation |
 |--------|------|------------|
-| **Unauthorized group member** | Anyone in the WhatsApp group can command agents | Set `ALLOWED_SENDERS` whitelist |
-| **Compromised WhatsApp API credentials** | If your Green API / WAHA token leaks, an attacker can send messages as any sender, **bypassing the whitelist entirely** | Guard `.env` like a root password. Never commit it. Rotate tokens regularly |
+| **Unauthorized group/chat member** | Anyone in the WA group or TG chat can command agents | Set `ALLOWED_SENDERS` / `TG_ALLOWED_SENDERS` whitelists |
+| **Compromised API credentials** | If your Green API token or TG bot token leaks, an attacker can inject messages | Guard `.env` like a root password. Never commit it. Rotate tokens regularly |
 | **Compromised WhatsApp account** | If your phone is compromised, attacker has full access | Use 2FA on WhatsApp, secure your phone |
 | **WAHA/Green API server compromise** | If the API provider is breached, messages can be injected | Self-host WAHA on trusted infrastructure if possible |
 | **Agent escape** | An agent could modify the orchestrator itself, disable security, or exfiltrate data | Run on an isolated machine / VM with limited network access |
