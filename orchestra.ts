@@ -660,6 +660,12 @@ function addChannelMessageId(agentId: string, channel: "wa" | "tg", messageId: s
 
 // ── Agent Spawner ───────────────────────────────────────────────────────────
 
+function cleanEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  delete env.CLAUDECODE;
+  return env;
+}
+
 function getSystemPrompt(agentId: string): string {
   let template = "";
   try {
@@ -710,6 +716,7 @@ async function spawnAgent(
       timeout: 300000, // 5 min
       maxBuffer: 10 * 1024 * 1024,
       cwd: __dirname,
+      env: cleanEnv(),
     });
 
     // Parse output
@@ -804,6 +811,7 @@ async function resumeAgent(
       timeout: 300000,
       maxBuffer: 10 * 1024 * 1024,
       cwd: __dirname,
+      env: cleanEnv(),
     });
 
     let output = "";
