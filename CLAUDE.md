@@ -23,3 +23,6 @@ npm start
 ## Environment
 Copy `.env` and set `WA_GROUP_ID` to your WhatsApp group ID.
 For Telegram, set `TG_BOT_TOKEN` + `TG_CHAT_ID`. Leave `TG_CHAT_ID` empty to disable.
+
+## TODO
+- [ ] טפל במיילים - הוסף תמיכה בקריאת/שליחת מיילים כערוץ פקודות (כמו WA/TG)
